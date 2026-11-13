@@ -1,0 +1,41 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Django files
+*.log
+db.sqlite3
+media/
+
+# Python testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# AI model temporary files
+*.tmp
+
+# Node.js and React
+node_modules/
+dist/
+build/
+.vite/
+
+# Environment and editor files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
