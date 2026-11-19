@@ -41,12 +41,22 @@ class CommunityHealthRecordListCreateView(generics.ListCreateAPIView):
             "lga"
         ).all()
 
-        if profile.role == "COMMUNITY_REPORTER":
+        if profile.role == "SYSTEM_ADMIN":
+            pass
+
+        elif profile.role in [
+            "PUBLIC_HEALTH_OFFICER",
+            "COMMUNITY_REPORTER",
+        ]:
             if profile.lga_id is None:
                 return queryset.none()
 
             queryset = queryset.filter(lga_id=profile.lga_id)
 
+        else:
+            return queryset.none()
+
+        # Apply optional filters only after enforcing role-based scope.
         lga_id = self.request.query_params.get("lga")
         reporting_date = self.request.query_params.get("date")
 

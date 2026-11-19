@@ -1,4 +1,4 @@
-
+﻿
 from datetime import date, timedelta
 
 from django.test import TestCase
@@ -196,12 +196,12 @@ class DataQualityTests(TestCase):
         self.assertIn("community", result["missing_sources"])
 
 
-class AssessmentWithdrawalTests(TestCase):
+class AssessmentPreservationTests(TestCase):
 
     def setUp(self):
         self.lga = LocalGovernmentArea.objects.create(
-            name="Withdrawal Test LGA",
-            code="WITHDRAWAL-TEST",
+            name="Preservation Test LGA",
+            code="PRESERVATION-TEST",
         )
 
         self.target_date = date(2026, 11, 8)
@@ -218,51 +218,42 @@ class AssessmentWithdrawalTests(TestCase):
             model_version="test-model",
         )
 
-    def test_same_day_assessment_is_withdrawn(self):
+    def test_same_day_assessment_is_preserved(self):
         assessment = self.create_assessment(self.target_date)
 
-        withdrawn = self.command.withdraw_existing_assessment(
-            self.lga,
-            self.target_date,
+        existing = self.command.get_existing_assessment(
+            self.lga, self.target_date
         )
 
-        self.assertTrue(withdrawn)
+        self.assertIsNotNone(existing)
+        self.assertEqual(existing.id, assessment.id)
 
-        self.assertFalse(
-            HealthRiskAssessment.objects.filter(
-                id=assessment.id
-            ).exists()
-        )
+        assessment.refresh_from_db()
+        self.assertEqual(assessment.risk_level, "HIGH")
+        self.assertEqual(assessment.risk_score, 0.85)
 
     def test_previous_date_assessment_is_preserved(self):
         previous_date = self.target_date - timedelta(days=1)
-
         assessment = self.create_assessment(previous_date)
 
-        withdrawn = self.command.withdraw_existing_assessment(
-            self.lga,
-            self.target_date,
+        existing = self.command.get_existing_assessment(
+            self.lga, self.target_date
         )
 
-        self.assertFalse(withdrawn)
-
+        self.assertIsNone(existing)
         self.assertTrue(
             HealthRiskAssessment.objects.filter(
                 id=assessment.id
             ).exists()
         )
 
-    def test_no_assessment_returns_false(self):
-        withdrawn = self.command.withdraw_existing_assessment(
-            self.lga,
-            self.target_date,
+    def test_no_assessment_returns_none(self):
+        existing = self.command.get_existing_assessment(
+            self.lga, self.target_date
         )
 
-        self.assertFalse(withdrawn)
-        self.assertEqual(
-            HealthRiskAssessment.objects.count(),
-            0,
-        )
+        self.assertIsNone(existing)
+        self.assertEqual(HealthRiskAssessment.objects.count(), 0)
 
     def test_assessment_with_alert_is_preserved(self):
         assessment = self.create_assessment(self.target_date)
@@ -274,12 +265,12 @@ class AssessmentWithdrawalTests(TestCase):
             recommended_action="Request public-health review.",
         )
 
-        withdrawn = self.command.withdraw_existing_assessment(
-            self.lga,
-            self.target_date,
+        existing = self.command.get_existing_assessment(
+            self.lga, self.target_date
         )
 
-        self.assertFalse(withdrawn)
+        self.assertIsNotNone(existing)
+        self.assertEqual(existing.id, assessment.id)
 
         self.assertTrue(
             HealthRiskAssessment.objects.filter(

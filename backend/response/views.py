@@ -35,6 +35,25 @@ class PublicHealthAlertViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
 
+        profile = self.request.user.profile
+
+        # System administrators can access alerts across all LGAs.
+        if profile.role == "SYSTEM_ADMIN":
+            pass
+
+        # Public health officers can only access their assigned LGA.
+        elif profile.role == "PUBLIC_HEALTH_OFFICER":
+            if profile.lga_id:
+                queryset = queryset.filter(
+                    assessment__lga_id=profile.lga_id
+                )
+            else:
+                queryset = queryset.none()
+
+        else:
+            queryset = queryset.none()
+
+        # Optional filters.
         lga = self.request.query_params.get("lga")
         alert_status = self.request.query_params.get("status")
         risk_level = self.request.query_params.get("risk_level")

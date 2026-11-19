@@ -22,11 +22,6 @@ class EnvironmentalObservationAPITests(APITestCase):
             password="TestPassword123!"
         )
 
-        UserProfile.objects.create(
-            user=self.user,
-            role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
-        )
-
         self.client.force_authenticate(user=self.user)
 
         self.lga1 = LocalGovernmentArea.objects.create(
@@ -37,6 +32,12 @@ class EnvironmentalObservationAPITests(APITestCase):
         self.lga2 = LocalGovernmentArea.objects.create(
             name="Test Jos South",
             code="TEST-JS"
+        )
+
+        UserProfile.objects.create(
+            user=self.user,
+            role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+            lga=self.lga1,
         )
 
         self.observation1 = EnvironmentalObservation.objects.create(
@@ -63,7 +64,7 @@ class EnvironmentalObservationAPITests(APITestCase):
 
         self.url = reverse("environmental-observation-list")
 
-    def create_user_client(self, username, role):
+    def create_user_client(self, username, role, lga=None):
         user = User.objects.create_user(
             username=username,
             password="TestPassword123!"
@@ -72,6 +73,7 @@ class EnvironmentalObservationAPITests(APITestCase):
         UserProfile.objects.create(
             user=user,
             role=role,
+            lga=lga,
         )
 
         client = APIClient()
@@ -83,7 +85,8 @@ class EnvironmentalObservationAPITests(APITestCase):
         response = self.client.get(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["lga"], self.lga1.id)
 
     def test_filter_observations_by_lga(self):
         response = self.client.get(
@@ -108,6 +111,73 @@ class EnvironmentalObservationAPITests(APITestCase):
             "2026-11-01"
         )
 
+    def test_officer_cannot_bypass_lga_scope_with_filter(self):
+        response = self.client.get(
+            self.url,
+            {"lga": self.lga2.id}
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 0)
+
+    def test_officer_without_lga_sees_no_observations(self):
+        client = self.create_user_client(
+            "environment_officer_without_lga",
+            UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+        )
+
+        response = client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 0)
+
+    def test_officer_cannot_submit_observation_for_another_lga(self):
+        response = self.client.post(
+            self.url,
+            {
+                "lga": self.lga2.id,
+                "observation_date": "2026-11-05",
+                "rainfall_mm": 20.0,
+                "temperature_celsius": 27.0,
+                "humidity_percentage": 60.0,
+                "air_quality_index": 35.0,
+                "flood_occurred": False,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        self.assertIn("lga", response.data)
+
+    def test_officer_without_lga_cannot_submit_observation(self):
+        client = self.create_user_client(
+            "environment_unassigned_officer",
+            UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+        )
+
+        response = client.post(
+            self.url,
+            {
+                "lga": self.lga1.id,
+                "observation_date": "2026-11-06",
+                "rainfall_mm": 20.0,
+                "temperature_celsius": 27.0,
+                "humidity_percentage": 60.0,
+                "air_quality_index": 35.0,
+                "flood_occurred": False,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
     def test_unauthenticated_user_cannot_view_observations(self):
         self.client.force_authenticate(user=None)
 
@@ -127,6 +197,7 @@ class EnvironmentalObservationAPITests(APITestCase):
         response = client.get(self.url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 2)
 
     def test_health_facility_reporter_cannot_view_observations(self):
         client = self.create_user_client(
@@ -291,3 +362,26 @@ class EnvironmentalObservationAPITests(APITestCase):
             audit_entry.actor.username,
             "environment_test"
         )
+
+    def test_environmental_submission_rejects_future_observation_date(self):
+        response = self.client.post(
+            self.url,
+            {
+                "lga": self.lga1.id,
+                "observation_date": "2026-11-20",
+                "rainfall_mm": 20.0,
+                "temperature_celsius": 27.0,
+                "humidity_percentage": 60.0,
+                "air_quality_index": 35.0,
+                "flood_occurred": False,
+                "source": "Test weather station",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            response.data,
+        )
+        self.assertIn("observation_date", response.data)

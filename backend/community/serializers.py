@@ -1,6 +1,8 @@
 
 from rest_framework import serializers
 
+from django.utils import timezone
+
 from .models import CommunityHealthRecord
 
 
@@ -37,6 +39,13 @@ class CommunityHealthRecordSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
+        reporting_date = attrs.get("reporting_date")
+
+        if reporting_date and reporting_date > timezone.localdate():
+            raise serializers.ValidationError({
+                "reporting_date": "Reporting date cannot be in the future."
+            })
+
         instance = self.instance
 
         population = attrs.get(

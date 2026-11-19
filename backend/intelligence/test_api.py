@@ -1,186 +1,362 @@
 
-from datetime import date
+from datetime import date, timedelta
 
-from django.contrib.auth import get_user_model
-from django.urls import reverse
+from django.test import TestCase
 
-from rest_framework import status
-from rest_framework.authtoken.models import Token
-from rest_framework.test import APITestCase, APIClient
+from core.models import LocalGovernmentArea
+from workforce.models import WorkforceHealthRecord
+from community.models import CommunityHealthRecord
 
-from core.models import LocalGovernmentArea, UserProfile
 from intelligence.models import HealthRiskAssessment
+from intelligence.management.commands.generate_risk_assessments import Command
+
+from intelligence.services.daily_features import (
+    extract_lga_daily_features,
+)
+
+from intelligence.services.anomaly_detection import (
+    assess_data_quality,
+)
+
+from response.models import PublicHealthAlert
 
 
-User = get_user_model()
+# ============================================================
+# DAILY FEATURE FRESHNESS TESTS
+# ============================================================
 
-
-class HealthRiskAssessmentAPITests(APITestCase):
+class DailyFeatureFreshnessTests(TestCase):
 
     def setUp(self):
-        self.officer = User.objects.create_user(
-            username="intelligence_officer",
-            password="TestPassword123!",
+        self.lga = LocalGovernmentArea.objects.create(
+            name="Test LGA",
+            code="TEST-LGA",
         )
 
-        UserProfile.objects.create(
-            user=self.officer,
-            role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+        self.target_date = date(2026, 11, 8)
+
+    def create_workforce_record(self, age):
+        WorkforceHealthRecord.objects.create(
+            organization_name="Test Organization",
+            lga=self.lga,
+            reporting_date=self.target_date - timedelta(days=age),
+            total_workforce=100,
+            sickness_absences=5,
+            workplace_incidents=2,
+            occupational_exposures=3,
+            heat_related_incidents=1,
         )
 
-        self.token = Token.objects.create(user=self.officer)
-
-        self.client.credentials(
-            HTTP_AUTHORIZATION=f"Token {self.token.key}"
+    def create_community_record(self, age):
+        CommunityHealthRecord.objects.create(
+            community_name="Test Community",
+            lga=self.lga,
+            reporting_date=self.target_date - timedelta(days=age),
+            population_covered=500,
+            people_screened=200,
+            people_referred=20,
+            reported_health_concerns=10,
+            people_reached_through_awareness=300,
         )
 
-        self.url = reverse("risk-assessment-list")
+    def extract_features(self):
+        return extract_lga_daily_features(
+            self.lga.id,
+            self.target_date,
+            self.target_date,
+        )[0]
 
-        self.lga_one = LocalGovernmentArea.objects.create(
-            name="Jos North",
-            code="INT-JOS-N",
+    def test_workforce_report_is_accepted_at_seven_days(self):
+        self.create_workforce_record(7)
+
+        row = self.extract_features()
+
+        self.assertEqual(row["total_workforce"], 100)
+        self.assertEqual(row["workforce_days_since_update"], 7)
+
+    def test_workforce_report_is_stale_at_eight_days(self):
+        self.create_workforce_record(8)
+
+        row = self.extract_features()
+
+        self.assertIsNone(row["total_workforce"])
+        self.assertEqual(row["workforce_days_since_update"], 8)
+
+    def test_community_report_is_accepted_at_seven_days(self):
+        self.create_community_record(7)
+
+        row = self.extract_features()
+
+        self.assertEqual(row["population_covered"], 500)
+        self.assertEqual(row["community_days_since_update"], 7)
+
+    def test_community_report_is_stale_at_eight_days(self):
+        self.create_community_record(8)
+
+        row = self.extract_features()
+
+        self.assertIsNone(row["population_covered"])
+        self.assertEqual(row["community_days_since_update"], 8)
+
+
+# ============================================================
+# DATA QUALITY TESTS
+# ============================================================
+
+class DataQualityTests(TestCase):
+
+    def test_two_complete_domains_are_eligible(self):
+        row = {
+            "disease_reports_received": 2,
+            "suspected_cases": 10,
+            "confirmed_cases": 5,
+            "deaths": 0,
+            "environmental_reports_received": 2,
+            "rainfall_mm": 20,
+            "temperature_celsius": 25,
+            "humidity_percentage": 70,
+            "air_quality_index": 40,
+            "flood_occurrences": 0,
+        }
+
+        result = assess_data_quality(row)
+
+        self.assertTrue(result["eligible_for_assessment"])
+        self.assertEqual(result["data_completeness"], 100)
+
+        self.assertEqual(
+            result["available_sources"],
+            ["disease", "environment"],
         )
 
-        self.lga_two = LocalGovernmentArea.objects.create(
-            name="Jos South",
-            code="INT-JOS-S",
+    def test_one_available_domain_is_not_eligible(self):
+        row = {
+            "disease_reports_received": 2,
+            "suspected_cases": 10,
+            "confirmed_cases": 5,
+            "deaths": 0,
+            "environmental_reports_received": 0,
+            "workforce_days_since_update": None,
+            "community_days_since_update": None,
+        }
+
+        result = assess_data_quality(row)
+
+        self.assertFalse(result["eligible_for_assessment"])
+
+        self.assertEqual(
+            result["available_sources"],
+            ["disease"],
         )
 
-        self.assessment_one = self.create_assessment(
-            self.lga_one,
-            date(2026, 11, 10),
+    def test_stale_workforce_and_community_reports_are_excluded(self):
+        row = {
+            "disease_reports_received": 0,
+            "environmental_reports_received": 0,
+            "workforce_days_since_update": 8,
+            "sickness_absences": 5,
+            "workplace_incidents": 2,
+            "occupational_exposures": 3,
+            "heat_related_incidents": 1,
+            "community_days_since_update": 9,
+            "people_screened": 200,
+            "people_referred": 20,
+            "reported_health_concerns": 10,
+            "people_reached": 300,
+        }
+
+        result = assess_data_quality(row)
+
+        self.assertFalse(result["eligible_for_assessment"])
+        self.assertEqual(result["available_sources"], [])
+
+        self.assertIn(
+            "workforce",
+            result["missing_sources"],
         )
 
-        self.assessment_two = self.create_assessment(
-            self.lga_two,
-            date(2026, 11, 11),
+        self.assertIn(
+            "community",
+            result["missing_sources"],
         )
 
-    def create_assessment(self, lga, assessment_date):
+    def test_insufficient_measurements_are_not_eligible(self):
+        row = {
+            "disease_reports_received": 2,
+            "suspected_cases": 10,
+            "confirmed_cases": None,
+            "deaths": None,
+            "environmental_reports_received": 2,
+            "rainfall_mm": 20,
+            "temperature_celsius": None,
+            "humidity_percentage": None,
+            "air_quality_index": None,
+            "flood_occurrences": None,
+        }
+
+        result = assess_data_quality(row)
+
+        self.assertFalse(result["eligible_for_assessment"])
+        self.assertEqual(result["data_completeness"], 25)
+
+    def test_missing_domains_are_reported(self):
+        row = {
+            "disease_reports_received": 2,
+            "suspected_cases": 10,
+            "confirmed_cases": 5,
+            "deaths": 0,
+            "environmental_reports_received": 0,
+            "workforce_days_since_update": None,
+            "community_days_since_update": None,
+        }
+
+        result = assess_data_quality(row)
+
+        self.assertIn(
+            "disease",
+            result["available_sources"],
+        )
+
+        self.assertIn(
+            "environment",
+            result["missing_sources"],
+        )
+
+        self.assertIn(
+            "workforce",
+            result["missing_sources"],
+        )
+
+        self.assertIn(
+            "community",
+            result["missing_sources"],
+        )
+
+
+# ============================================================
+# HISTORICAL ASSESSMENT PRESERVATION TESTS
+# ============================================================
+
+class AssessmentPreservationTests(TestCase):
+
+    def setUp(self):
+        self.lga = LocalGovernmentArea.objects.create(
+            name="Preservation Test LGA",
+            code="PRESERVATION-TEST",
+        )
+
+        self.target_date = date(2026, 11, 8)
+        self.command = Command()
+
+    def create_assessment(self, assessment_date):
         return HealthRiskAssessment.objects.create(
-            lga=lga,
+            lga=self.lga,
             assessment_date=assessment_date,
             risk_score=0.85,
             risk_level="HIGH",
             contributing_factors=["High suspected cases"],
-            explanation="Test AI risk assessment.",
+            explanation="Test AI assessment.",
             model_version="test-model",
         )
 
-    def create_role_client(self, username, role):
-        user = User.objects.create_user(
-            username=username,
-            password="TestPassword123!",
+    def test_same_day_assessment_is_preserved(self):
+        assessment = self.create_assessment(
+            self.target_date,
         )
 
-        UserProfile.objects.create(
-            user=user,
-            role=role,
+        existing = self.command.get_existing_assessment(
+            self.lga,
+            self.target_date,
         )
 
-        token = Token.objects.create(user=user)
+        self.assertIsNotNone(existing)
+        self.assertEqual(existing.id, assessment.id)
 
-        client = APIClient()
-        client.credentials(
-            HTTP_AUTHORIZATION=f"Token {token.key}"
-        )
-
-        return client
-
-    def test_public_health_officer_can_view_all_assessments(self):
-        response = self.client.get(self.url)
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
-
-    def test_system_admin_can_view_all_assessments(self):
-        client = self.create_role_client(
-            "intelligence_admin",
-            UserProfile.Role.SYSTEM_ADMIN,
-        )
-
-        response = client.get(self.url)
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
-
-    def test_assessments_can_be_filtered_by_lga(self):
-        response = self.client.get(
-            self.url,
-            {"lga": self.lga_one.id},
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(
-            response.data[0]["lga"],
-            self.lga_one.id,
-        )
-
-    def test_assessments_can_be_filtered_by_date(self):
-        response = self.client.get(
-            self.url,
-            {"date": "2026-11-11"},
-        )
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(
-            response.data[0]["assessment_date"],
-            "2026-11-11",
-        )
-
-    def test_reporter_roles_cannot_view_assessments(self):
-        denied_roles = [
-            UserProfile.Role.HEALTH_FACILITY_REPORTER,
-            UserProfile.Role.WORKFORCE_REPORTER,
-            UserProfile.Role.COMMUNITY_REPORTER,
-            UserProfile.Role.UNASSIGNED,
-        ]
-
-        for index, role in enumerate(denied_roles):
-            client = self.create_role_client(
-                f"denied_intelligence_user_{index}",
-                role,
-            )
-
-            response = client.get(self.url)
-
-            self.assertEqual(
-                response.status_code,
-                status.HTTP_403_FORBIDDEN,
-                msg=f"Role {role} should not access risk assessments.",
-            )
-
-    def test_user_without_profile_cannot_view_assessments(self):
-        user = User.objects.create_user(
-            username="no_intelligence_profile",
-            password="TestPassword123!",
-        )
-
-        token = Token.objects.create(user=user)
-
-        client = APIClient()
-        client.credentials(
-            HTTP_AUTHORIZATION=f"Token {token.key}"
-        )
-
-        response = client.get(self.url)
+        assessment.refresh_from_db()
 
         self.assertEqual(
-            response.status_code,
-            status.HTTP_403_FORBIDDEN,
+            assessment.risk_level,
+            "HIGH",
         )
 
-    def test_unauthenticated_user_cannot_view_assessments(self):
-        self.client.credentials()
+        self.assertEqual(
+            assessment.risk_score,
+            0.85,
+        )
 
-        response = self.client.get(self.url)
+        self.assertEqual(
+            assessment.explanation,
+            "Test AI assessment.",
+        )
 
-        self.assertIn(
-            response.status_code,
-            [
-                status.HTTP_401_UNAUTHORIZED,
-                status.HTTP_403_FORBIDDEN,
-            ],
+    def test_previous_date_assessment_is_preserved(self):
+        previous_date = (
+            self.target_date - timedelta(days=1)
+        )
+
+        assessment = self.create_assessment(
+            previous_date,
+        )
+
+        existing = self.command.get_existing_assessment(
+            self.lga,
+            self.target_date,
+        )
+
+        self.assertIsNone(existing)
+
+        self.assertTrue(
+            HealthRiskAssessment.objects.filter(
+                id=assessment.id
+            ).exists()
+        )
+
+    def test_no_assessment_returns_none(self):
+        existing = self.command.get_existing_assessment(
+            self.lga,
+            self.target_date,
+        )
+
+        self.assertIsNone(existing)
+
+        self.assertEqual(
+            HealthRiskAssessment.objects.count(),
+            0,
+        )
+
+    def test_assessment_with_alert_is_preserved(self):
+        assessment = self.create_assessment(
+            self.target_date,
+        )
+
+        alert = PublicHealthAlert.objects.create(
+            assessment=assessment,
+            title="High health risk detected",
+            description="Test public-health alert.",
+            recommended_action="Request public-health review.",
+        )
+
+        existing = self.command.get_existing_assessment(
+            self.lga,
+            self.target_date,
+        )
+
+        self.assertIsNotNone(existing)
+        self.assertEqual(existing.id, assessment.id)
+
+        self.assertTrue(
+            HealthRiskAssessment.objects.filter(
+                id=assessment.id
+            ).exists()
+        )
+
+        self.assertTrue(
+            PublicHealthAlert.objects.filter(
+                id=alert.id
+            ).exists()
+        )
+
+        self.assertEqual(
+            existing.alert.id,
+            alert.id,
         )

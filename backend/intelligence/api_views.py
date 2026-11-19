@@ -24,6 +24,23 @@ class HealthRiskAssessmentListAPIView(generics.ListAPIView):
             .order_by("-assessment_date", "lga__name")
         )
 
+        profile = self.request.user.profile
+
+        # System administrators can access assessments statewide.
+        if profile.role == "SYSTEM_ADMIN":
+            pass
+
+        # Public health officers can only access their assigned LGA.
+        elif profile.role == "PUBLIC_HEALTH_OFFICER":
+            if profile.lga_id:
+                queryset = queryset.filter(lga_id=profile.lga_id)
+            else:
+                queryset = queryset.none()
+
+        else:
+            queryset = queryset.none()
+
+        # Optional filters are applied after role-based restrictions.
         lga_id = self.request.query_params.get("lga")
         assessment_date = self.request.query_params.get("date")
 

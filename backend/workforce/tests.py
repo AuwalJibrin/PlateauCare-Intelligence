@@ -198,16 +198,44 @@ class WorkforceAPITests(APITestCase):
             status.HTTP_400_BAD_REQUEST,
         )
 
-    def test_public_health_officer_can_view_all_records(self):
+    def test_public_health_officer_only_sees_assigned_lga_records(self):
         client = self.create_role_client(
             "public_health_user",
+            "PUBLIC_HEALTH_OFFICER",
+            self.lga,
+        )
+
+        response = client.get(reverse("workforce-record-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["lga"], self.lga.id)
+
+    def test_public_health_officer_cannot_bypass_lga_scope_with_filter(self):
+        client = self.create_role_client(
+            "public_health_filter_user",
+            "PUBLIC_HEALTH_OFFICER",
+            self.lga,
+        )
+
+        response = client.get(
+            reverse("workforce-record-list"),
+            {"lga": self.second_lga.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 0)
+
+    def test_public_health_officer_without_lga_sees_no_records(self):
+        client = self.create_role_client(
+            "public_health_unassigned",
             "PUBLIC_HEALTH_OFFICER",
         )
 
         response = client.get(reverse("workforce-record-list"))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(len(response.data), 0)
 
     def test_system_admin_can_view_all_records(self):
         client = self.create_role_client(
@@ -435,3 +463,26 @@ class WorkforceAPITests(APITestCase):
             response.status_code,
             status.HTTP_400_BAD_REQUEST,
         )
+
+    def test_workforce_submission_rejects_future_reporting_date(self):
+        response = self.client.post(
+            reverse("workforce-record-list"),
+            {
+                "organization_name": "Future Date Test Organisation",
+                "lga": self.lga.id,
+                "reporting_date": "2026-11-20",
+                "total_workforce": 50,
+                "sickness_absences": 5,
+                "workplace_incidents": 2,
+                "occupational_exposures": 1,
+                "heat_related_incidents": 1,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            response.data,
+        )
+        self.assertIn("reporting_date", response.data)

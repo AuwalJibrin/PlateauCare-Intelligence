@@ -35,19 +35,28 @@ class WorkforceHealthRecordListCreateView(generics.ListCreateAPIView):
         return [permission() for permission in permission_classes]
 
     def get_queryset(self):
-        user = self.request.user
-        profile = user.profile
+        profile = self.request.user.profile
 
         queryset = WorkforceHealthRecord.objects.select_related(
             "lga"
         ).all()
 
-        if profile.role == "WORKFORCE_REPORTER":
+        if profile.role == "SYSTEM_ADMIN":
+            pass
+
+        elif profile.role in [
+            "PUBLIC_HEALTH_OFFICER",
+            "WORKFORCE_REPORTER",
+        ]:
             if profile.lga_id is None:
                 return queryset.none()
 
             queryset = queryset.filter(lga_id=profile.lga_id)
 
+        else:
+            return queryset.none()
+
+        # Apply optional filters only after enforcing role-based scope.
         lga_id = self.request.query_params.get("lga")
         reporting_date = self.request.query_params.get("date")
 

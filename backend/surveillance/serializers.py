@@ -1,6 +1,8 @@
 
 from rest_framework import serializers
 
+from django.utils import timezone
+
 from .models import Disease, DiseaseReport
 
 
@@ -69,6 +71,13 @@ class DiseaseReportSerializer(serializers.ModelSerializer):
         validators = []
 
     def validate(self, attrs):
+        reporting_date = attrs.get("reporting_date")
+
+        if reporting_date and reporting_date > timezone.localdate():
+            raise serializers.ValidationError({
+                "reporting_date": "Reporting date cannot be in the future."
+            })
+
         numerical_fields = [
             "suspected_cases",
             "confirmed_cases",
@@ -76,6 +85,7 @@ class DiseaseReportSerializer(serializers.ModelSerializer):
             "recoveries",
         ]
 
+        # Reject negative case counts
         for field in numerical_fields:
             value = attrs.get(field, 0)
 
@@ -84,6 +94,26 @@ class DiseaseReportSerializer(serializers.ModelSerializer):
                     field: "This value cannot be negative."
                 })
 
+        # Validate deaths and recoveries against confirmed cases
+        confirmed_cases = attrs.get("confirmed_cases", 0)
+        deaths = attrs.get("deaths", 0)
+        recoveries = attrs.get("recoveries", 0)
+
+        if deaths > confirmed_cases:
+            raise serializers.ValidationError({
+                "deaths": (
+                    "Deaths cannot exceed confirmed cases."
+                )
+            })
+
+        if recoveries > confirmed_cases:
+            raise serializers.ValidationError({
+                "recoveries": (
+                    "Recoveries cannot exceed confirmed cases."
+                )
+            })
+
+        # Check for duplicate disease reports
         request = self.context.get("request")
 
         if request and request.method == "POST":

@@ -41,9 +41,11 @@ class DiseaseListView(generics.ListAPIView):
 
 class DiseaseReportListView(generics.ListCreateAPIView):
     """
-    Public-health officers can view reports.
+    System administrators can view reports statewide.
 
-    Verified health-facility reporters can submit reports
+    Public-health officers can view reports from their assigned LGA.
+
+    Verified health-facility reporters can view and submit reports
     for their own assigned facility only.
     """
 
@@ -64,8 +66,7 @@ class DiseaseReportListView(generics.ListCreateAPIView):
         return [permission() for permission in permission_classes]
 
     def get_queryset(self):
-        user = self.request.user
-        profile = user.profile
+        profile = self.request.user.profile
 
         queryset = DiseaseReport.objects.select_related(
             "disease",
@@ -73,7 +74,21 @@ class DiseaseReportListView(generics.ListCreateAPIView):
             "lga",
         ).all()
 
-        if profile.role == "HEALTH_FACILITY_REPORTER":
+        # System administrators have statewide access.
+        if profile.role == "SYSTEM_ADMIN":
+            pass
+
+        # Public-health officers are restricted to their assigned LGA.
+        elif profile.role == "PUBLIC_HEALTH_OFFICER":
+            if profile.lga_id is None:
+                return queryset.none()
+
+            queryset = queryset.filter(
+                lga_id=profile.lga_id
+            )
+
+        # Facility reporters are restricted to their assigned facility.
+        elif profile.role == "HEALTH_FACILITY_REPORTER":
             facility = profile.health_facility
 
             if (
@@ -87,6 +102,10 @@ class DiseaseReportListView(generics.ListCreateAPIView):
                 health_facility=facility
             )
 
+        else:
+            return queryset.none()
+
+        # Optional filters are applied after access restrictions.
         lga_id = self.request.query_params.get("lga")
         disease_id = self.request.query_params.get("disease")
         report_date = self.request.query_params.get("date")
@@ -99,10 +118,14 @@ class DiseaseReportListView(generics.ListCreateAPIView):
             queryset = queryset.filter(disease_id=disease_id)
 
         if report_date:
-            queryset = queryset.filter(reporting_date=report_date)
+            queryset = queryset.filter(
+                reporting_date=report_date
+            )
 
         if report_status:
-            queryset = queryset.filter(status=report_status.upper())
+            queryset = queryset.filter(
+                status=report_status.upper()
+            )
 
         return queryset
 
@@ -123,6 +146,8 @@ class DiseaseReportListView(generics.ListCreateAPIView):
                 )
             })
 
+        # Facility and LGA are assigned by the backend,
+        # never trusted from the submitted request.
         record = serializer.save(
             health_facility=facility,
             lga=facility.lga,

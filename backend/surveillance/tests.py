@@ -28,20 +28,20 @@ class SurveillanceAPITestCase(APITestCase):
             password="TestPassword123!"
         )
 
+        self.lga = LocalGovernmentArea.objects.create(
+            name="Jos North",
+            code="JOS-N"
+        )
+
         UserProfile.objects.create(
             user=self.user,
             role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+            lga=self.lga,
         )
-
         self.token = Token.objects.create(user=self.user)
 
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Token {self.token.key}"
-        )
-
-        self.lga = LocalGovernmentArea.objects.create(
-            name="Jos North",
-            code="JOS-N"
         )
 
         self.facility = HealthFacility.objects.create(
@@ -248,6 +248,75 @@ class SurveillanceAPITestCase(APITestCase):
         )
 
     # --------------------------------------------------
+    # PUBLIC HEALTH OFFICER LGA ACCESS CONTROL TESTS
+
+    def test_public_health_officer_only_sees_assigned_lga_reports(self):
+        other_report = self.create_report_for_another_facility()
+
+        response = self.client.get(
+            reverse("disease-report-list")
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["lga"], self.lga.id)
+
+        filtered_response = self.client.get(
+            reverse("disease-report-list"),
+            {"lga": other_report.lga_id}
+        )
+
+        self.assertEqual(
+            filtered_response.status_code,
+            status.HTTP_200_OK
+        )
+        self.assertEqual(len(filtered_response.data), 0)
+
+    def test_public_health_officer_without_lga_sees_no_reports(self):
+        unassigned_user = User.objects.create_user(
+            username="unassigned_officer",
+            password="TestPassword123!"
+        )
+
+        UserProfile.objects.create(
+            user=unassigned_user,
+            role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+        )
+
+        unassigned_client = APIClient()
+        unassigned_client.force_authenticate(user=unassigned_user)
+
+        response = unassigned_client.get(
+            reverse("disease-report-list")
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 0)
+
+    def test_system_admin_can_view_reports_across_lgas(self):
+        self.create_report_for_another_facility()
+
+        admin_user = User.objects.create_user(
+            username="surveillance_system_admin",
+            password="TestPassword123!"
+        )
+
+        UserProfile.objects.create(
+            user=admin_user,
+            role=UserProfile.Role.SYSTEM_ADMIN,
+        )
+
+        admin_client = APIClient()
+        admin_client.force_authenticate(user=admin_user)
+
+        response = admin_client.get(
+            reverse("disease-report-list")
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 2)
+
+
     # FACILITY REPORTER ACCESS RESTRICTION TESTS
     # --------------------------------------------------
 
@@ -398,3 +467,27 @@ class SurveillanceAPITestCase(APITestCase):
             audit_entry.actor.username,
             "facility_reporter"
         )
+
+    def test_facility_reporter_cannot_submit_future_disease_report(self):
+        reporter_client = self.create_facility_reporter()
+
+        response = reporter_client.post(
+            reverse("disease-report-list"),
+            {
+                "disease": self.disease.id,
+                "reporting_date": "2026-11-20",
+                "suspected_cases": 10,
+                "confirmed_cases": 5,
+                "deaths": 0,
+                "recoveries": 2,
+                "status": "SUSPECTED",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            response.data,
+        )
+        self.assertIn("reporting_date", response.data)

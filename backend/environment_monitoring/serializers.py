@@ -1,4 +1,6 @@
-from rest_framework import serializers
+﻿from rest_framework import serializers
+from django.utils import timezone
+
 from .models import EnvironmentalObservation
 
 
@@ -32,6 +34,13 @@ class EnvironmentalObservationSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def validate_observation_date(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError(
+                "Observation date cannot be in the future."
+            )
+        return value
 
     def validate_rainfall_mm(self, value):
         if value is not None and value < 0:

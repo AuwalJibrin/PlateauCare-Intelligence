@@ -39,3 +39,11 @@ build/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+django-insecure-plateaucare-local-d.txt
+
+# Django collected static files
+backend/staticfiles/
+
+# Exclude GeoJSON data without confirmed redistribution permission
+frontend/public/data/nigeria-lgas.geojson

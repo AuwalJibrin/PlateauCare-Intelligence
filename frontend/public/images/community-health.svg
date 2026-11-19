@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgCom" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0A192F" />
+      <stop offset="100%" stop-color="#0F2744" />
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#bgCom)" />
+  
+  <!-- Community Network Mesh -->
+  <g stroke="#14B8A6" stroke-width="1.5" stroke-opacity="0.3">
+    <line x1="200" y1="300" x2="350" y2="220" />
+    <line x1="350" y1="220" x2="450" y2="220" />
+    <line x1="450" y1="220" x2="600" y2="300" />
+    <line x1="350" y1="220" x2="400" y2="360" />
+    <line x1="450" y1="220" x2="400" y2="360" />
+    <line x1="200" y1="300" x2="300" y2="420" />
+    <line x1="600" y1="300" x2="500" y2="420" />
+    <line x1="300" y1="420" x2="400" y2="360" />
+    <line x1="500" y1="420" x2="400" y2="360" />
+  </g>
+
+  <!-- Network Nodes (Outreach & Screening Points) -->
+  <circle cx="400" cy="360" r="28" fill="#0D9488" stroke="#5EEAD4" stroke-width="3" />
+  <circle cx="350" cy="220" r="20" fill="#1E293B" stroke="#14B8A6" stroke-width="2.5" />
+  <circle cx="450" cy="220" r="20" fill="#1E293B" stroke="#14B8A6" stroke-width="2.5" />
+  <circle cx="200" cy="300" r="16" fill="#1E293B" stroke="#2DD4BF" stroke-width="2" />
+  <circle cx="600" cy="300" r="16" fill="#1E293B" stroke="#2DD4BF" stroke-width="2" />
+  <circle cx="300" cy="420" r="16" fill="#1E293B" stroke="#2DD4BF" stroke-width="2" />
+  <circle cx="500" cy="420" r="16" fill="#1E293B" stroke="#2DD4BF" stroke-width="2" />
+
+  <!-- Center Heart Icon -->
+  <path d="M 400 350 C 395 342 384 344 384 353 C 384 362 400 372 400 372 C 400 372 416 362 416 353 C 416 344 405 342 400 350 Z" fill="#F0FDFA" />
+</svg>
+

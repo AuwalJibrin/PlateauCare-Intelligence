@@ -31,6 +31,15 @@ class Command(BaseCommand):
         "for Plateau State LGAs."
     )
 
+    REQUIRED_ARTIFACT_FIELDS = {
+        "pipeline",
+        "features",
+        "training_scores",
+        "medians",
+        "iqrs",
+        "model_version",
+    }
+
     def add_arguments(self, parser):
         parser.add_argument(
             "--date",
@@ -39,51 +48,20 @@ class Command(BaseCommand):
             help="Assessment date in YYYY-MM-DD format.",
         )
 
-    def withdraw_existing_assessment(self, lga, assessment_date):
+    def get_existing_assessment(self, lga, assessment_date):
         """
-        Withdraw an existing assessment when its data is no
-        longer eligible, but preserve assessments protected
-        by an existing public-health alert.
+        Retrieve an existing assessment without modifying or
+        deleting its historical record.
         """
-
-        assessments = HealthRiskAssessment.objects.filter(
+        return HealthRiskAssessment.objects.filter(
             lga=lga,
             assessment_date=assessment_date,
-        )
+        ).first()
 
-        protected_assessment = assessments.filter(
-            alert__isnull=False
-        ).exists()
-
-        if protected_assessment:
-            self.stdout.write(
-                self.style.WARNING(
-                    f"SKIPPED WITHDRAWAL: {lga.name} | "
-                    "An existing public-health alert protects "
-                    "this assessment."
-                )
-            )
-            return False
-
-        deleted_count, _ = assessments.delete()
-
-        return deleted_count > 0
-
-    def handle(self, *args, **options):
-        # Determine the assessment date.
-        supplied_date = options.get("assessment_date")
-
-        if supplied_date:
-            try:
-                assessment_date = date.fromisoformat(supplied_date)
-            except ValueError:
-                raise CommandError(
-                    "Invalid date. Use YYYY-MM-DD format."
-                )
-        else:
-            assessment_date = timezone.localdate()
-
-        # Locate the trained Isolation Forest model.
+    def load_model_artifact(self):
+        """
+        Load and validate the trained Isolation Forest artifact.
+        """
         model_path = (
             Path(settings.BASE_DIR)
             / "intelligence"
@@ -99,15 +77,74 @@ class Command(BaseCommand):
 
         try:
             artifact = joblib.load(model_path)
+
         except Exception as exc:
             raise CommandError(
                 f"Could not load the AI model: {exc}"
             )
 
-        if not isinstance(artifact, dict) or "pipeline" not in artifact:
+        if not isinstance(artifact, dict):
             raise CommandError(
-                "The model artifact is invalid or incomplete."
+                "The AI model artifact must be a dictionary."
             )
+
+        missing_fields = (
+            self.REQUIRED_ARTIFACT_FIELDS - set(artifact.keys())
+        )
+
+        if missing_fields:
+            raise CommandError(
+                "The model artifact is incomplete. Missing fields: "
+                + ", ".join(sorted(missing_fields))
+            )
+
+        if artifact["pipeline"] is None:
+            raise CommandError(
+                "The trained AI model pipeline is missing."
+            )
+
+        if not artifact["features"]:
+            raise CommandError(
+                "The model artifact contains no feature definitions."
+            )
+
+        if not artifact["model_version"]:
+            raise CommandError(
+                "The model artifact has no model version."
+            )
+
+        return artifact
+
+    def get_assessment_date(self, supplied_date):
+        """
+        Validate the supplied date or use today's local date.
+        """
+        if not supplied_date:
+            return timezone.localdate()
+
+        try:
+            return date.fromisoformat(supplied_date)
+
+        except ValueError:
+            raise CommandError(
+                "Invalid date. Use YYYY-MM-DD format."
+            )
+
+    def handle(self, *args, **options):
+
+        # --------------------------------------------------
+        # 1. Determine the assessment date.
+        # --------------------------------------------------
+
+        assessment_date = self.get_assessment_date(
+            options.get("assessment_date")
+        )
+
+        # --------------------------------------------------
+        # 2. Load the trained AI model.
+        # --------------------------------------------------
+
+        artifact = self.load_model_artifact()
 
         self.stdout.write(
             self.style.SUCCESS(
@@ -116,50 +153,125 @@ class Command(BaseCommand):
             )
         )
 
+        # --------------------------------------------------
+        # 3. Initialize counters.
+        # --------------------------------------------------
+
         lgas = LocalGovernmentArea.objects.all().order_by("name")
+
+        total_lgas = lgas.count()
 
         created_count = 0
         updated_count = 0
         skipped_count = 0
+        no_data_count = 0
+        quality_skip_count = 0
+        preserved_count = 0
         alert_count = 0
+
+        # --------------------------------------------------
+        # 4. Process each Local Government Area.
+        # --------------------------------------------------
 
         for lga in lgas:
 
-            # Extract the LGA's daily population-health features.
-            rows = extract_lga_daily_features(
-                lga.id,
-                assessment_date,
-                assessment_date,
+            self.stdout.write(
+                f"\nProcessing {lga.name}..."
             )
 
-            if not rows:
-                self.withdraw_existing_assessment(
-                    lga,
+            # ----------------------------------------------
+            # 4A. Extract daily population-health features.
+            # ----------------------------------------------
+
+            try:
+                rows = extract_lga_daily_features(
+                    lga.id,
+                    assessment_date,
                     assessment_date,
                 )
 
+            except Exception as exc:
+                raise CommandError(
+                    f"Feature extraction failed for "
+                    f"{lga.name}: {exc}"
+                )
+
+            # ----------------------------------------------
+            # 4B. Handle missing daily feature data.
+            # ----------------------------------------------
+
+            if not rows:
+
                 skipped_count += 1
+                no_data_count += 1
+
+                existing_assessment = (
+                    self.get_existing_assessment(
+                        lga,
+                        assessment_date,
+                    )
+                )
+
+                if existing_assessment:
+                    preserved_count += 1
+
+                    preservation_message = (
+                        "Existing assessment preserved."
+                    )
+
+                else:
+                    preservation_message = (
+                        "No previous assessment exists."
+                    )
 
                 self.stdout.write(
                     self.style.WARNING(
                         f"SKIPPED: {lga.name} | "
-                        "No daily feature data available."
+                        "No daily feature data available. "
+                        f"{preservation_message}"
                     )
                 )
+
                 continue
 
             row = rows[-1]
 
-            # Check whether the available data is sufficient.
-            quality = assess_data_quality(row)
+            # ----------------------------------------------
+            # 4C. Evaluate data quality.
+            # ----------------------------------------------
 
-            if not quality["eligible_for_assessment"]:
-                self.withdraw_existing_assessment(
-                    lga,
-                    assessment_date,
+            try:
+                quality = assess_data_quality(row)
+
+            except Exception as exc:
+                raise CommandError(
+                    f"Data-quality assessment failed for "
+                    f"{lga.name}: {exc}"
                 )
 
+            if not quality["eligible_for_assessment"]:
+
                 skipped_count += 1
+                quality_skip_count += 1
+
+                existing_assessment = (
+                    self.get_existing_assessment(
+                        lga,
+                        assessment_date,
+                    )
+                )
+
+                if existing_assessment:
+                    preserved_count += 1
+
+                    preservation_message = (
+                        "Existing assessment preserved."
+                    )
+
+                else:
+                    preservation_message = (
+                        "No previous assessment exists."
+                    )
 
                 self.stdout.write(
                     self.style.WARNING(
@@ -167,20 +279,42 @@ class Command(BaseCommand):
                         f"Data completeness: "
                         f"{quality['data_completeness']}% | "
                         f"Available sources: "
-                        f"{quality['available_sources']}"
+                        f"{quality['available_sources']} | "
+                        f"Missing sources: "
+                        f"{quality['missing_sources']} | "
+                        f"Stale sources: "
+                        f"{quality['stale_sources']} | "
+                        f"Invalid sources: "
+                        f"{quality['invalid_sources']} | "
+                        f"{preservation_message}"
                     )
                 )
+
                 continue
 
-            # Calculate the anomaly score using the trained model.
+            # ----------------------------------------------
+            # 4D. Calculate the anomaly score.
+            # ----------------------------------------------
+
             try:
                 result = score_anomaly(row, artifact)
+
             except Exception as exc:
                 raise CommandError(
                     f"AI assessment failed for {lga.name}: {exc}"
                 )
 
+            # ----------------------------------------------
+            # 4E. Prepare the explanation.
+            # ----------------------------------------------
+
             explanations = result.get("explanation", [])
+
+            if explanations is None:
+                explanations = []
+
+            if isinstance(explanations, str):
+                explanations = [explanations]
 
             explanation_text = "\n".join(
                 str(item) for item in explanations
@@ -192,23 +326,34 @@ class Command(BaseCommand):
                     "Further review of the source data is recommended."
                 )
 
-            # Save or update the assessment for this LGA and date.
-            assessment, created = (
-                HealthRiskAssessment.objects.update_or_create(
-                    lga=lga,
-                    assessment_date=assessment_date,
-                    defaults={
-                        "risk_score": result["risk_score"],
-                        "risk_level": result["risk_level"],
-                        "contributing_factors": explanations,
-                        "explanation": explanation_text,
-                        "model_version": result["model_version"],
-                    },
+            # ----------------------------------------------
+            # 4F. Save or update the assessment.
+            # ----------------------------------------------
+
+            try:
+                assessment, created = (
+                    HealthRiskAssessment.objects.update_or_create(
+                        lga=lga,
+                        assessment_date=assessment_date,
+                        defaults={
+                            "risk_score": result["risk_score"],
+                            "risk_level": result["risk_level"],
+                            "contributing_factors": explanations,
+                            "explanation": explanation_text,
+                            "model_version": result["model_version"],
+                        },
+                    )
                 )
-            )
+
+            except Exception as exc:
+                raise CommandError(
+                    f"Could not save the assessment for "
+                    f"{lga.name}: {exc}"
+                )
 
             if created:
                 created_count += 1
+
             else:
                 updated_count += 1
 
@@ -220,10 +365,20 @@ class Command(BaseCommand):
                 )
             )
 
-            # Generate an alert if the assessment is HIGH or CRITICAL.
-            alert, alert_created = generate_alert_for_assessment(
-                assessment
-            )
+            # ----------------------------------------------
+            # 4G. Generate alerts when necessary.
+            # ----------------------------------------------
+
+            try:
+                alert, alert_created = (
+                    generate_alert_for_assessment(assessment)
+                )
+
+            except Exception as exc:
+                raise CommandError(
+                    f"Alert generation failed for "
+                    f"{lga.name}: {exc}"
+                )
 
             if alert_created:
                 alert_count += 1
@@ -235,23 +390,63 @@ class Command(BaseCommand):
                     )
                 )
 
-        self.stdout.write("")
+        # --------------------------------------------------
+        # 5. Display the assessment summary.
+        # --------------------------------------------------
+
+        self.stdout.write("\n")
+
         self.stdout.write(
             self.style.SUCCESS(
                 "HEALTH-RISK ASSESSMENT SUMMARY"
             )
         )
 
-        self.stdout.write(f"Assessment date: {assessment_date}")
-        self.stdout.write(f"New assessments: {created_count}")
-        self.stdout.write(f"Updated assessments: {updated_count}")
-        self.stdout.write(f"Skipped LGAs: {skipped_count}")
-        self.stdout.write(f"New public-health alerts: {alert_count}")
+        self.stdout.write(
+            f"Assessment date: {assessment_date}"
+        )
+
+        self.stdout.write(
+            f"Total LGAs processed: {total_lgas}"
+        )
+
+        self.stdout.write(
+            f"New assessments: {created_count}"
+        )
+
+        self.stdout.write(
+            f"Updated assessments: {updated_count}"
+        )
+
+        self.stdout.write(
+            f"Skipped LGAs: {skipped_count}"
+        )
+
+        self.stdout.write(
+            f"  - No daily data: {no_data_count}"
+        )
+
+        self.stdout.write(
+            f"  - Failed data quality: {quality_skip_count}"
+        )
+
+        self.stdout.write(
+            f"Existing assessments preserved: {preserved_count}"
+        )
+
+        self.stdout.write(
+            f"New public-health alerts: {alert_count}"
+        )
+
+        self.stdout.write("\n")
 
         self.stdout.write(
             self.style.WARNING(
-                "Important: The anomaly score is not a probability "
-                "of a disease outbreak. Assessments require "
-                "public-health review and verification."
+                "IMPORTANT: The anomaly score is not a probability "
+                "of a disease outbreak. Missing or insufficient "
+                "data does not cause previous assessments to be "
+                "deleted. Existing assessments are retained for "
+                "historical review. All assessments require "
+                "appropriate public-health review and verification."
             )
         )

@@ -1,6 +1,7 @@
 
 from django.db import models
 from django.core.exceptions import ValidationError
+
 from core.models import HealthFacility, LocalGovernmentArea
 
 
@@ -99,6 +100,26 @@ class DiseaseReport(models.Model):
 
             if value is not None and value < 0:
                 errors[field] = "This value cannot be negative."
+
+        # Deaths cannot exceed confirmed cases
+        if (
+            self.deaths is not None
+            and self.confirmed_cases is not None
+            and self.deaths > self.confirmed_cases
+        ):
+            errors["deaths"] = (
+                "Deaths cannot exceed confirmed cases."
+            )
+
+        # Recoveries cannot exceed confirmed cases
+        if (
+            self.recoveries is not None
+            and self.confirmed_cases is not None
+            and self.recoveries > self.confirmed_cases
+        ):
+            errors["recoveries"] = (
+                "Recoveries cannot exceed confirmed cases."
+            )
 
         if errors:
             raise ValidationError(errors)

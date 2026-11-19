@@ -1,4 +1,3 @@
-
 from datetime import date
 
 from django.contrib.auth import get_user_model
@@ -9,7 +8,6 @@ from rest_framework import status
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APITestCase, APIClient
 
-from django.contrib.contenttypes.models import ContentType
 from auditlog.models import AuditLog
 
 from core.models import LocalGovernmentArea, UserProfile
@@ -187,14 +185,22 @@ class AlertGenerationServiceTests(PublicHealthAlertModelTests):
 class PublicHealthAlertAPITests(APITestCase):
 
     def setUp(self):
+        # Create the LGA before creating the officer profile.
+        self.lga = LocalGovernmentArea.objects.create(
+            name="API Alert Test LGA",
+            code="API-ALERT-TEST",
+        )
+
         self.officer = User.objects.create_user(
             username="alert_officer",
             password="TestPassword123!",
         )
 
+        # Assign the officer to the LGA used by the default test alert.
         UserProfile.objects.create(
             user=self.officer,
             role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+            lga=self.lga,
         )
 
         self.admin = User.objects.create_user(
@@ -205,11 +211,6 @@ class PublicHealthAlertAPITests(APITestCase):
         UserProfile.objects.create(
             user=self.admin,
             role=UserProfile.Role.SYSTEM_ADMIN,
-        )
-
-        self.lga = LocalGovernmentArea.objects.create(
-            name="API Alert Test LGA",
-            code="API-ALERT-TEST",
         )
 
         self.assessment = HealthRiskAssessment.objects.create(
@@ -248,7 +249,7 @@ class PublicHealthAlertAPITests(APITestCase):
             HTTP_AUTHORIZATION=f"Token {self.officer_token.key}"
         )
 
-    def create_role_client(self, username, role):
+    def create_role_client(self, username, role, lga=None):
         user = User.objects.create_user(
             username=username,
             password="TestPassword123!",
@@ -257,6 +258,7 @@ class PublicHealthAlertAPITests(APITestCase):
         UserProfile.objects.create(
             user=user,
             role=role,
+            lga=lga,
         )
 
         token = Token.objects.create(user=user)
@@ -267,6 +269,24 @@ class PublicHealthAlertAPITests(APITestCase):
         )
 
         return client
+
+    def create_alert_for_lga(self, lga, assessment_date, title):
+        assessment = HealthRiskAssessment.objects.create(
+            lga=lga,
+            assessment_date=assessment_date,
+            risk_score=0.98,
+            risk_level="CRITICAL",
+            contributing_factors=["High suspected cases"],
+            explanation="Additional LGA test assessment.",
+            model_version="test-model",
+        )
+
+        return PublicHealthAlert.objects.create(
+            assessment=assessment,
+            title=title,
+            description="Test alert belonging to another LGA.",
+            recommended_action="Request urgent review.",
+        )
 
     def test_public_health_officer_can_list_alerts(self):
         response = self.client.get(self.list_url)
@@ -291,6 +311,93 @@ class PublicHealthAlertAPITests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 1)
+
+    def test_officer_cannot_view_alert_from_another_lga(self):
+        another_lga = LocalGovernmentArea.objects.create(
+            name="Another Alert Test LGA",
+            code="ANOTHER-ALERT-TEST",
+        )
+
+        another_alert = self.create_alert_for_lga(
+            another_lga,
+            date(2026, 11, 9),
+            "Another LGA critical alert",
+        )
+
+        url = reverse(
+            "public-health-alert-detail",
+            kwargs={"pk": another_alert.pk},
+        )
+
+        response = self.client.get(url)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_officer_list_contains_only_alerts_from_assigned_lga(self):
+        another_lga = LocalGovernmentArea.objects.create(
+            name="Officer List Other LGA",
+            code="OFFICER-LIST-OTHER",
+        )
+
+        self.create_alert_for_lga(
+            another_lga,
+            date(2026, 11, 9),
+            "Alert outside officer LGA",
+        )
+
+        response = self.client.get(self.list_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["lga_name"], self.lga.name)
+
+    def test_officer_without_assigned_lga_sees_no_alerts(self):
+        unassigned_officer = User.objects.create_user(
+            username="unassigned_officer",
+            password="TestPassword123!",
+        )
+
+        UserProfile.objects.create(
+            user=unassigned_officer,
+            role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+        )
+
+        token = Token.objects.create(user=unassigned_officer)
+
+        client = APIClient()
+        client.credentials(
+            HTTP_AUTHORIZATION=f"Token {token.key}"
+        )
+
+        response = client.get(self.list_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 0)
+
+    def test_system_admin_can_view_alerts_across_lgas(self):
+        another_lga = LocalGovernmentArea.objects.create(
+            name="Admin Second Test LGA",
+            code="ADMIN-SECOND-TEST",
+        )
+
+        self.create_alert_for_lga(
+            another_lga,
+            date(2026, 11, 9),
+            "Second LGA critical alert",
+        )
+
+        client = APIClient()
+        client.credentials(
+            HTTP_AUTHORIZATION=f"Token {self.admin_token.key}"
+        )
+
+        response = client.get(self.list_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 2)
 
     def test_reporter_roles_cannot_view_alerts(self):
         denied_roles = [
@@ -489,7 +596,6 @@ class PublicHealthAlertAPITests(APITestCase):
             response.status_code,
             status.HTTP_405_METHOD_NOT_ALLOWED,
         )
-
 
     def test_acknowledging_alert_creates_audit_log(self):
         url = reverse(

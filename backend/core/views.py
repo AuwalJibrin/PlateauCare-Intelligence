@@ -38,10 +38,12 @@ class LocalGovernmentAreaListView(generics.ListAPIView):
     ]
 
 
+
 class HealthFacilityListView(generics.ListAPIView):
     """
-    Public-health officers can view all facilities.
-    Facility reporters can only view their assigned facility.
+    System administrators can view all facilities.
+    Public-health officers can view facilities in their assigned LGA.
+    Facility reporters can only view their assigned verified facility.
     """
 
     serializer_class = HealthFacilitySerializer
@@ -52,12 +54,17 @@ class HealthFacilityListView(generics.ListAPIView):
     ]
 
     def get_queryset(self):
-        user = self.request.user
-        profile = user.profile
+        profile = self.request.user.profile
 
         queryset = HealthFacility.objects.select_related("lga").all()
 
-        if profile.role == "HEALTH_FACILITY_REPORTER":
+        if profile.role == "PUBLIC_HEALTH_OFFICER":
+            if profile.lga_id is None:
+                return queryset.none()
+
+            queryset = queryset.filter(lga_id=profile.lga_id)
+
+        elif profile.role == "HEALTH_FACILITY_REPORTER":
             facility = profile.health_facility
 
             if (
@@ -68,6 +75,8 @@ class HealthFacilityListView(generics.ListAPIView):
                 return queryset.none()
 
             queryset = queryset.filter(pk=facility.pk)
+
+        # SYSTEM_ADMIN retains statewide access.
 
         lga_id = self.request.query_params.get("lga")
 
@@ -84,7 +93,6 @@ class HealthFacilityListView(generics.ListAPIView):
             )
 
         return queryset.order_by("name")
-
 
 
 

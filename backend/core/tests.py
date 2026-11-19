@@ -31,11 +31,6 @@ class CoreAPITestCase(APITestCase):
             password="TestPassword123!"
         )
 
-        UserProfile.objects.create(
-            user=self.user,
-            role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
-        )
-
         self.token = Token.objects.create(user=self.user)
 
         self.client.credentials(
@@ -50,6 +45,12 @@ class CoreAPITestCase(APITestCase):
         self.second_lga = LocalGovernmentArea.objects.create(
             name="Jos South",
             code="JOS-S"
+        )
+
+        UserProfile.objects.create(
+            user=self.user,
+            role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+            lga=self.lga,
         )
 
         self.facility = HealthFacility.objects.create(
@@ -106,7 +107,8 @@ class CoreAPITestCase(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["lga"], self.lga.id)
 
     def test_health_facilities_can_be_filtered_by_lga(self):
         response = self.client.get(
@@ -125,7 +127,7 @@ class CoreAPITestCase(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 2)
+        self.assertEqual(len(response.data), 1)
 
     def test_unauthenticated_user_cannot_access_lgas(self):
         self.client.credentials()
@@ -139,6 +141,44 @@ class CoreAPITestCase(APITestCase):
                 status.HTTP_403_FORBIDDEN
             ]
         )
+
+    def test_public_health_officer_cannot_bypass_lga_scope_with_filter(self):
+        response = self.client.get(
+            reverse("health-facility-list"),
+            {"lga": self.second_lga.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 0)
+
+    def test_public_health_officer_without_lga_sees_no_facilities(self):
+        user = User.objects.create_user(
+            username="unassigned_health_officer",
+            password="TestPassword123!",
+        )
+        UserProfile.objects.create(
+            user=user,
+            role=UserProfile.Role.PUBLIC_HEALTH_OFFICER,
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.get(reverse("health-facility-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 0)
+
+    def test_system_admin_can_view_facilities_across_lgas(self):
+        client = self.create_reporter_client(
+            "core_system_admin",
+            UserProfile.Role.SYSTEM_ADMIN,
+        )
+
+        response = client.get(reverse("health-facility-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 2)
 
     def test_facility_reporter_only_sees_assigned_facility(self):
         client = self.create_reporter_client(
